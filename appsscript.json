@@ -1,0 +1,22 @@
+{
+  "runtimeVersion": "V8",
+  "timeZone": "Africa/Johannesburg",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      {
+        "userSymbol": "Chat",
+        "version": "v1",
+        "serviceId": "chat"
+      }
+    ]
+  },
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/chat.spaces.readonly",
+    "https://www.googleapis.com/auth/chat.messages.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/script.scriptapp",
+    "https://www.googleapis.com/auth/gmail.send"
+  ],
+  "exceptionLogging": "STACKDRIVER"
+}
