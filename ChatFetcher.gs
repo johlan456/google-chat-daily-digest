@@ -1,7 +1,78 @@
 /**
  * ChatFetcher.gs — Google Chat API via Advanced Service.
  * Uses Chat.Spaces.list() and Chat.Spaces.Messages.list() for user-auth access.
+ * Resolves user IDs to display names via the People API.
  */
+
+// In-memory cache for user ID → display name (persists for the duration of a single run)
+var userNameCache_ = {};
+
+/**
+ * Resolves a Chat user ID (e.g. "users/110576037464867965962") to a display name
+ * using the People API. Results are cached for the duration of the run.
+ * @param {string} userId - Chat user resource name (e.g. "users/12345")
+ * @returns {string} Display name or the original userId if lookup fails
+ */
+function resolveUserName(userId) {
+  if (!userId || !userId.match(/^users\/\d+$/)) {
+    return userId || 'Unknown';
+  }
+
+  // Check cache first
+  if (userNameCache_[userId]) {
+    return userNameCache_[userId];
+  }
+
+  try {
+    // Convert "users/12345" to "people/12345" for the People API
+    var peopleId = userId.replace(/^users\//, 'people/');
+    var person = People.People.get(peopleId, { personFields: 'names,emailAddresses' });
+
+    var displayName = null;
+    if (person.names && person.names.length > 0) {
+      displayName = person.names[0].displayName;
+    }
+    if (!displayName && person.emailAddresses && person.emailAddresses.length > 0) {
+      displayName = person.emailAddresses[0].value.split('@')[0];
+    }
+
+    if (displayName) {
+      userNameCache_[userId] = displayName;
+      return displayName;
+    }
+  } catch (e) {
+    logError('resolveUserName(' + userId + ')', e);
+  }
+
+  // Cache the failure too so we don't retry
+  userNameCache_[userId] = userId;
+  return userId;
+}
+
+/**
+ * Resolves a display name that may contain user IDs.
+ * Handles comma-separated lists like "users/123, users/456".
+ * @param {string} displayName
+ * @returns {string} Resolved display name
+ */
+function resolveDisplayName(displayName) {
+  if (!displayName || displayName.indexOf('users/') === -1) {
+    return displayName;
+  }
+
+  // Split on comma, resolve each part
+  var parts = displayName.split(',');
+  var resolved = [];
+  for (var i = 0; i < parts.length; i++) {
+    var part = parts[i].trim();
+    if (part.match(/^users\/\d+$/)) {
+      resolved.push(resolveUserName(part));
+    } else {
+      resolved.push(part);
+    }
+  }
+  return resolved.join(', ');
+}
 
 /**
  * Lists all spaces the authenticated user is a member of.
@@ -40,42 +111,9 @@ function getActiveSpaces() {
 }
 
 /**
- * Resolves a display name for DM spaces that have no displayName.
- * Queries the space members and returns the other participant's name.
- * @param {string} spaceName - e.g. "spaces/AAAA..."
- * @returns {string} Display name or email of the DM partner
- */
-function resolveDmDisplayName(spaceName) {
-  try {
-    var response = Chat.Spaces.Members.list(spaceName, { pageSize: 10 });
-    var members = response.memberships || [];
-    var currentUserEmail = getAuthenticatedUserEmail();
-    var names = [];
-
-    for (var i = 0; i < members.length; i++) {
-      var member = members[i].member;
-      if (member && member.type === 'HUMAN') {
-        var memberName = member.displayName || member.name || '';
-        // Skip the current user in DMs to show the other person's name
-        if (currentUserEmail && member.email && member.email === currentUserEmail) {
-          continue;
-        }
-        if (memberName) {
-          names.push(memberName);
-        }
-      }
-    }
-
-    return names.length > 0 ? names.join(', ') : 'Direct Message';
-  } catch (e) {
-    logError('resolveDmDisplayName', e);
-    return 'Direct Message';
-  }
-}
-
-/**
  * Fetches messages for a specific space after a given timestamp.
  * Handles pagination and filters to human messages only.
+ * Resolves sender user IDs to display names via the People API.
  * @param {string} spaceName - The space resource name
  * @param {string} afterTimestamp - ISO 8601 timestamp for the filter
  * @returns {Array<Object>} Array of {sender, senderEmail, text, createTime}
@@ -114,8 +152,14 @@ function getMessagesForSpace(spaceName, afterTimestamp) {
         continue;
       }
 
+      // Resolve sender name: use displayName if available, otherwise look up via People API
+      var senderName = sender.displayName;
+      if (!senderName && sender.name) {
+        senderName = resolveUserName(sender.name);
+      }
+
       messages.push({
-        sender: sender.displayName || sender.name || 'Unknown',
+        sender: senderName || 'Unknown',
         senderEmail: sender.email || '',
         text: msg.text || msg.formattedText || '',
         createTime: msg.createTime
@@ -155,13 +199,12 @@ function fetchLast24hActivity() {
       continue;
     }
 
-    // Resolve display name for DMs with empty displayName
-    var displayName = space.displayName;
-    if (!displayName && (space.spaceType === 'DIRECT_MESSAGE' || space.spaceType === 'DM')) {
-      displayName = resolveDmDisplayName(space.spaceName);
-    }
-    if (!displayName) {
-      displayName = space.spaceName;
+    // Resolve display name — handles user IDs in DM space names
+    var displayName = resolveDisplayName(space.displayName);
+
+    // If still unresolved or empty, extract from message senders
+    if (!displayName || displayName.indexOf('users/') !== -1 || displayName.indexOf('spaces/') !== -1) {
+      displayName = getDmNameFromMessages_(messages);
     }
 
     results.push({
@@ -178,4 +221,23 @@ function fetchLast24hActivity() {
 
   console.log('Total active spaces: ' + results.length);
   return results;
+}
+
+/**
+ * Extracts unique sender display names from messages to use as a DM label.
+ * @param {Array<Object>} messages
+ * @returns {string}
+ * @private
+ */
+function getDmNameFromMessages_(messages) {
+  var seen = {};
+  var names = [];
+  for (var i = 0; i < messages.length; i++) {
+    var name = messages[i].sender;
+    if (name && !seen[name] && name !== 'Unknown' && !name.match(/^users\/\d+$/)) {
+      seen[name] = true;
+      names.push(name);
+    }
+  }
+  return names.length > 0 ? names.join(', ') : 'Direct Message';
 }
